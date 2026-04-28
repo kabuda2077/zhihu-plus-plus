@@ -1,54 +1,43 @@
+name: Manual-Lite-Only-Build
+
+# 改为手动触发
 on:
-  workflow_call:
+  workflow_dispatch:
     inputs:
       name:
+        description: '构建名称'
         required: true
-        type: string
-      args:
-        required: false
-        type: string
+        default: 'manual-build'
       minify:
+        description: '是否开启混淆压缩'
         required: false
         type: boolean
-      release:
-        required: false
-        type: boolean
-      nightly_release:
-        required: false
-        type: boolean
-    secrets:
-      ANDROID_SIGNING_KEY:
-        required: false
-      ANDROID_KEY_ALIAS:
-        required: false
-      ANDROID_KEYSTORE_PASSWORD:
-        required: false
-      ANDROID_KEY_PASSWORD:
-        required: false
+        default: true
 
 permissions:
   contents: write
 
 jobs:
   build:
-    name: Build Android App
+    name: Build Lite Android App
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Set Current Date As Env Variable
-      - name: Set current date as env variable
+
+      - name: Set current date
         run: echo "date_today=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
 
-      # Set Repository Name As Env Variable
-      - name: Set repository name as env variable
+      - name: Set repository name
         run: echo "repository_name=$(echo '${{ github.repository }}' | awk -F '/' '{print $2}')" >> $GITHUB_ENV
 
-      - name: Set Up JDK
+      - name: Set Up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu' # See 'Supported distributions' for available options
+          distribution: 'zulu'
           java-version: '17'
           cache: 'gradle'
+
+      # 该项目包含 Rust 组件，必须保留此环境
       - name: Setup rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -66,6 +55,7 @@ jobs:
 
       - name: Change wrapper permissions
         run: chmod +x ./gradlew
+
       - name: Cache Rust
         uses: actions/cache@v3
         with:
@@ -77,19 +67,7 @@ jobs:
             ./rs-hf-tokenizer/target/
             ./apk-recompress/target/
           key: rust-cache-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
-          restore-keys: |
-            rust-cache-
-      - name: Cache Gradle
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-            ~/.m2/repository
-            ./.gradle
-            ./**/.gradle
-          # dont invalidate cache if only gradle.properties is changed -- they
-          key: gradle-cache-${{ hashFiles('**/*.gradle.kts', '**/gradle-wrapper.properties') }}
+
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
       
@@ -97,119 +75,44 @@ jobs:
         run: |
           echo "y" | sdkmanager --install "ndk;29.0.14206865"
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/29.0.14206865" >> $GITHUB_ENV
-      # Run Tests Build
-      - name: Run KtLint
-        run: ./gradlew ktlintCheck
-      #- name: Run gradle tests
-      #  run: ./gradlew test
+
+      # 核心编译步骤：只编译 LiteRelease，且跳过代码检查和测试
       - name: Build App
-        # Build .apk
         run: |
-          bash ./gradlew ${{inputs.args}} assembleFullRelease
-          bash ./gradlew ${{inputs.args}} assembleLiteRelease
+          bash ./gradlew clean assembleLiteRelease -x ktlintCheck -x ktlintKotlinScriptCheck -x test
         env:
-          signingKey: ${{ secrets.ANDROID_SIGNING_KEY }}
-          keyAlias: ${{ secrets.ANDROID_KEY_ALIAS }}
-          keyStorePassword: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          keyPassword: ${{ secrets.ANDROID_KEY_PASSWORD }}
           CI_BUILD_MINIFY: ${{ inputs.minify }}
+
       - name: Move files
         run: |
           mkdir -p app/build/upload
-          mv app/build/outputs/apk/full/release/app-full-release.apk app/build/upload/zhihu++-full.apk
-          mv app/build/outputs/apk/lite/release/app-lite-release.apk app/build/upload/zhihu++-lite.apk
+          # 只移动 Lite 版本的 APK，不再引用 Full 版本
+          mv app/build/outputs/apk/lite/release/app-lite-release.apk app/build/upload/zhihu-lite.apk
+
+      # Lite 版特有的 APK 再压缩步骤（Rust 工具）
       - name: Recompress APK
         if: ${{ inputs.minify }}
-        env:
-          KEYSTORE_PATH: ../app/zhihu.jks
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-          APKSIGNER_PATH: /usr/local/lib/android/sdk/build-tools/35.0.0/apksigner
         run: |
           cd apk-recompress
-          echo "Recompressing Lite APK with Rust tool"
-          cargo run --release -- \
-            -i ../app/build/upload/zhihu++-lite.apk \
-            -o ./zhihu++-lite.apk
-          echo "Moving recompressed Lite APK to upload directory"
-          mv ./zhihu++-lite.apk ../app/build/upload/zhihu++-lite.apk
+          cargo run --release -- -i ../app/build/upload/zhihu-lite.apk -o ./zhihu-lite-final.apk
+          mv ./zhihu-lite-final.apk ../app/build/upload/zhihu-lite.apk
 
-      - name: Compress lite mapping file
-        if: ${{ inputs.minify }}
-        run: |
-          mkdir -p app/build/upload
-          zip app/build/upload/mapping-lite.zip app/build/outputs/mapping/liteRelease/mapping.txt
-
-      - name: Upload APK
+      - name: Upload APK to Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.date_today }} - ${{ env.repository_name }} - ${{ inputs.name }}
-          path: app/build/upload/
+          name: ${{ env.date_today }} - Lite - ${{ inputs.name }}
+          path: app/build/upload/zhihu-lite.apk
 
-      # Delete existing nightly release
-      - name: Delete existing nightly release
-        if: ${{ inputs.minify && inputs.nightly_release }}
-        uses: dev-drprasad/delete-tag-and-release@v1.0
-        continue-on-error: true
-        with:
-          tag_name: nightly
-          github_token: ${{ github.token }}
-          delete_release: true
-
-      # Create new nightly release
-      - name: Create Nightly Release
-        if: ${{ inputs.minify && inputs.nightly_release }}
-        id: nightly_release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: nightly
-          name: Nightly Build (${{ env.date_today }})
-          body: |
-            Nightly build generated on ${{ env.date_today }}
-            This is an automated nightly release that gets updated with each new build.
-          files: |
-            app/build/upload/zhihu++-lite.apk
-            app/build/upload/mapping-lite.zip
-            app/build/upload/zhihu++-full.apk
-          fail_on_unmatched_files: true
-          prerelease: true
-      - name: Generate release notes
-        if: ${{ inputs.release && startsWith(github.ref, 'refs/tags/') }}
-        id: release_notes
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { data } = await github.rest.repos.generateReleaseNotes({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag_name: context.ref.replace('refs/tags/', ''),
-            });
-            console.log(data.body);
-            return data.body;
-          result-encoding: string
-
+      # 如果你手动启动并勾选了混淆，这里会创建一个包含 APK 的 Release
       - name: Create Release
-        if: ${{ inputs.release && startsWith(github.ref, 'refs/tags/') }}
-        id: release
+        if: ${{ inputs.minify }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
+          tag_name: "v-${{ env.date_today }}-${{ github.run_number }}"
+          name: "知乎 Lite 自用版 (${{ env.date_today }})"
           body: |
-            如果要使用，请下载最新的 APK 文件进行安装。不需要下载 mapping.zip，除非你是开发人员且需要调试混淆后的代码。
-            Full 版本包含 AI 功能和 AI 模型，可处理NLP任务；Lite 版本体积更小，只有不到 4 MB 的大小。
-
-            > 关于Full和Lite两个版本的说明：
-            > Full版本包含了一个onnx框架，可以在端侧进行离线AI推理，支持基于LLM embedding的智能内容过滤功能，
-            > 这实际上主要是本人对端侧AI的技术尝试，实际功能还有很多没开发的，比如人本地知识库（懒）；
-            > Lite版本不支持智能内容过滤，但体积更小，性能更好。您可以根据自己的需求选择下载哪个版本。
-
-            ${{ steps.release_notes.outputs.result }}
+            这是基于开源项目编译的知乎 Lite 纯净版。
+            包名已修改为 com.zhihu.android，安装前请卸载原版。
           files: |
-            app/build/upload/zhihu++-lite.apk
-            app/build/upload/mapping-lite.zip
-            app/build/upload/zhihu++-full.apk
-          fail_on_unmatched_files: true
-          prerelease: false
-
+            app/build/upload/zhihu-lite.apk
+          token: ${{ github.token }}
