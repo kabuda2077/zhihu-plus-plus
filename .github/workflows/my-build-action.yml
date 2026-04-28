@@ -1,6 +1,5 @@
-name: Manual-Lite-Only-Build
+name: Manual-Lite-Only-Build-V2
 
-# 改为手动触发
 on:
   workflow_dispatch:
     inputs:
@@ -8,11 +7,6 @@ on:
         description: '构建名称'
         required: true
         default: 'manual-build'
-      minify:
-        description: '是否开启混淆压缩'
-        required: false
-        type: boolean
-        default: true
 
 permissions:
   contents: write
@@ -37,7 +31,7 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
-      # 该项目包含 Rust 组件，必须保留此环境
+      # 仍然保留 Rust 环境，因为某些编译插件可能需要
       - name: Setup rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -56,18 +50,6 @@ jobs:
       - name: Change wrapper permissions
         run: chmod +x ./gradlew
 
-      - name: Cache Rust
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            ./rs-hf-tokenizer/target/
-            ./apk-recompress/target/
-          key: rust-cache-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
-
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
       
@@ -76,26 +58,20 @@ jobs:
           echo "y" | sdkmanager --install "ndk;29.0.14206865"
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/29.0.14206865" >> $GITHUB_ENV
 
-      # 核心编译步骤：只编译 LiteRelease，且跳过代码检查和测试
+      # 核心编译步骤：只编译 LiteRelease
       - name: Build App
         run: |
           bash ./gradlew clean assembleLiteRelease -x ktlintCheck -x ktlintKotlinScriptCheck -x test
         env:
-          CI_BUILD_MINIFY: ${{ inputs.minify }}
+          CI_BUILD_MINIFY: true
 
       - name: Move files
         run: |
           mkdir -p app/build/upload
-          # 只移动 Lite 版本的 APK，不再引用 Full 版本
+          # 移动原始生成的 Lite APK
           mv app/build/outputs/apk/lite/release/app-lite-release.apk app/build/upload/zhihu-lite.apk
 
-      # Lite 版特有的 APK 再压缩步骤（Rust 工具）
-      - name: Recompress APK
-        if: ${{ inputs.minify }}
-        run: |
-          cd apk-recompress
-          cargo run --release -- -i ../app/build/upload/zhihu-lite.apk -o ./zhihu-lite-final.apk
-          mv ./zhihu-lite-final.apk ../app/build/upload/zhihu-lite.apk
+      # --- 已删除 Recompress APK 步骤，避免签名报错 ---
 
       - name: Upload APK to Artifacts
         uses: actions/upload-artifact@v4
@@ -103,16 +79,14 @@ jobs:
           name: ${{ env.date_today }} - Lite - ${{ inputs.name }}
           path: app/build/upload/zhihu-lite.apk
 
-      # 如果你手动启动并勾选了混淆，这里会创建一个包含 APK 的 Release
       - name: Create Release
-        if: ${{ inputs.minify }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "v-${{ env.date_today }}-${{ github.run_number }}"
           name: "知乎 Lite 自用版 (${{ env.date_today }})"
           body: |
             这是基于开源项目编译的知乎 Lite 纯净版。
-            包名已修改为 com.zhihu.android，安装前请卸载原版。
+            跳过了再压缩步骤以确保 Debug 签名兼容性。
           files: |
             app/build/upload/zhihu-lite.apk
           token: ${{ github.token }}
