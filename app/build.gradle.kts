@@ -89,6 +89,7 @@ android {
             }
         }
     }
+
 buildTypes {
         val gitHash = gitHash(rootProject.projectDir)
         debug {
@@ -99,11 +100,10 @@ buildTypes {
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             buildConfigField("String", "GIT_HASH", "\"$gitHash\"")
-            
-            // 核心修复：强制使用 debug 签名方案，忽略原本有问题的 env 签名配置
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
