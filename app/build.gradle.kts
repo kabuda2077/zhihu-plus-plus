@@ -1,92 +1,269 @@
-name: Manual-Lite-Only-Build-V2
+@file:OptIn(ExperimentalEncodingApi::class)
 
-on:
-  workflow_dispatch:
-    inputs:
-      name:
-        description: '构建名称'
-        required: true
-        default: 'manual-build'
+import buildlogic.gitHash
+import org.gradle.api.tasks.testing.Test
+import org.gradle.jvm.toolchain.JavaLanguageVersion
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
 
-permissions:
-  contents: write
+plugins {
+    id("com.android.application")
+    id("com.mikepenz.aboutlibraries.plugin.android")
+    kotlin("android")
+    kotlin("plugin.serialization")
+    kotlin("plugin.compose")
+    id("kotlin-parcelize")
+    id("com.google.devtools.ksp")
+    id("org.jlleitschuh.gradle.ktlint")
+}
 
-jobs:
-  build:
-    name: Build Lite Android App
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+ktlint {
+    android.set(true)
+    outputToConsole.set(true)
+    enableExperimentalRules.set(true)
+    filter {
+        exclude("**/generated/**")
+        exclude("**/build/**")
+    }
+}
 
-      - name: Set current date
-        run: echo "date_today=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+ksp {
+    // Fix cache invalidation by stabilizing inputs
+    arg("room.schemaLocation", "$projectDir/schemas")
+    arg("room.incremental", "true")
+    // Stabilize logLevel to prevent cache invalidation
+    arg("logging.level", "WARN")
+}
 
-      - name: Set repository name
-        run: echo "repository_name=$(echo '${{ github.repository }}' | awk -F '/' '{print $2}')" >> $GITHUB_ENV
+android {
+    namespace = "com.github.zly2006.zhihu"
+    compileSdk = 36
 
-      - name: Set Up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'zulu'
-          java-version: '17'
-          cache: 'gradle'
+    defaultConfig {
+        applicationId = "com.zhihu.android"
+        minSdk = 27
+        targetSdk = 35
+        versionCode = property("app.versionCode").toString().toIntOrNull() ?: 1
+        versionName = property("app.versionName").toString()
 
-      # 仍然保留 Rust 环境，因为某些编译插件可能需要
-      - name: Setup rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          override: true
+        testInstrumentationRunner = "com.github.zly2006.zhihu.ZhihuInstrumentedTestRunner"
+    }
 
-      - name: Install cargo-ndk
-        run: cargo install cargo-ndk || true
+    flavorDimensions += "version"
+    productFlavors {
+        create("full") {
+            dimension = "version"
+            buildConfigField("boolean", "IS_LITE", "false")
+        }
+        create("lite") {
+            dimension = "version"
+            buildConfigField("boolean", "IS_LITE", "true")
+        }
+    }
 
-      - name: Add Android Rust targets
-        run: |
-          rustup target add aarch64-linux-android
-          rustup target add armv7-linux-androideabi
-          rustup target add i686-linux-android
-          rustup target add x86_64-linux-android
+    androidResources {
+        @Suppress("UnstableApiUsage")
+        localeFilters += listOf("en", "zh")
+    }
 
-      - name: Change wrapper permissions
-        run: chmod +x ./gradlew
+    sourceSets.getByName("androidTest").assets.srcDir(layout.buildDirectory.dir("generated/androidTestSecrets"))
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-      
-      - name: Install Android NDK
-        run: |
-          echo "y" | sdkmanager --install "ndk;29.0.14206865"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/29.0.14206865" >> $GITHUB_ENV
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
+        }
+    }
 
-      # 核心编译步骤：只编译 LiteRelease
-      - name: Build App
-        run: |
-          bash ./gradlew clean assembleLiteRelease -x ktlintCheck -x ktlintKotlinScriptCheck -x test
-        env:
-          CI_BUILD_MINIFY: true
+    signingConfigs {
+        if (System.getenv("signingKey") != null) {
+            register("env") {
+                storeFile =
+                    file("zhihu.jks").apply {
+                        writeBytes(Base64.decode(System.getenv("signingKey")))
+                    }
+                storePassword = System.getenv("keyStorePassword")
+                keyAlias = System.getenv("keyAlias")
+                keyPassword = System.getenv("keyPassword")
+            }
+        }
+    }
 
-      - name: Move files
-        run: |
-          mkdir -p app/build/upload
-          # 移动原始生成的 Lite APK
-          mv app/build/outputs/apk/lite/release/app-lite-release.apk app/build/upload/zhihu-lite.apk
+    buildTypes {
+        val gitHash = gitHash(rootProject.projectDir)
+        debug {
+            buildConfigField("String", "GIT_HASH", "\"$gitHash\"")
+        }
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            buildConfigField("String", "GIT_HASH", "\"$gitHash\"")
+            signingConfig = signingConfigs.getByName("debug")
+        }
+    }
 
-      # --- 已删除 Recompress APK 步骤，避免签名报错 ---
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlin {
+        jvmToolchain(17)
+    }
+    buildFeatures {
+        viewBinding = true
+        buildConfig = true
+        compose = true
+    }
 
-      - name: Upload APK to Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.date_today }} - Lite - ${{ inputs.name }}
-          path: app/build/upload/zhihu-lite.apk
+    packaging {
+        resources {
+            excludes +=
+                listOf(
+                    "META-INF/DEPENDENCIES",
+//                    "META-INF/*.version",
+                    "META-INF/**/LICENSE",
+                    "META-INF/**/LICENSE.txt",
+                    "META-INF/proguard/*",
+                    "**.kotlin_module",
+                    "kotlin-tooling-metadata.json",
+                    "DebugProbesKt.bin",
+//                    "META-INF/*.kotlin_module",
+                )
+        }
+    }
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: "v-${{ env.date_today }}-${{ github.run_number }}"
-          name: "知乎 Lite 自用版 (${{ env.date_today }})"
-          body: |
-            这是基于开源项目编译的知乎 Lite 纯净版。
-            跳过了再压缩步骤以确保 Debug 签名兼容性。
-          files: |
-            app/build/upload/zhihu-lite.apk
-          token: ${{ github.token }}
+    androidComponents {
+        beforeVariants(selector().all()) { variantBuilder ->
+            val flavorName = variantBuilder.flavorName
+            if (variantBuilder.buildType == "release") {
+                val minify =
+                    when (flavorName) {
+                        "lite" -> true
+                        else -> false
+                    }
+                variantBuilder.isMinifyEnabled = minify
+                variantBuilder.shrinkResources = minify
+            }
+        }
+    }
+}
+
+val generatedAndroidTestSecretsDir = layout.buildDirectory.dir("generated/androidTestSecrets")
+
+val prepareAndroidTestSecretAccount by tasks.registering {
+    val secretAccountFile = rootProject.file(".secret/account.json")
+    outputs.dir(generatedAndroidTestSecretsDir)
+    doLast {
+        val outputDir = generatedAndroidTestSecretsDir.get().asFile
+        delete(outputDir)
+        if (secretAccountFile.exists()) {
+            copy {
+                from(secretAccountFile)
+                into(outputDir.resolve("secret"))
+                rename { "account.json" }
+            }
+        }
+    }
+}
+
+tasks
+    .matching {
+        it.name.startsWith("merge") && it.name.contains("AndroidTestAssets")
+    }.configureEach {
+        dependsOn(prepareAndroidTestSecretAccount)
+    }
+
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
+    compilerOptions.freeCompilerArgs.add("-Xdebug")
+}
+
+tasks.withType<Test>().configureEach {
+    javaLauncher.set(
+        javaToolchains.launcherFor {
+            languageVersion.set(JavaLanguageVersion.of(21))
+        },
+    )
+}
+
+val ktor = "3.4.1"
+val coil = "3.4.0"
+val aboutLibraries = "14.0.1"
+dependencies {
+    implementation("androidx.preference:preference:1.2.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+    implementation("io.ktor:ktor-client-core-jvm:$ktor")
+    implementation("io.ktor:ktor-client-android:$ktor")
+    implementation("io.ktor:ktor-client-content-negotiation-jvm:$ktor")
+    implementation("io.ktor:ktor-serialization-kotlinx-json:$ktor")
+    implementation("org.jetbrains.kotlinx:kotlinx-datetime:0.7.1")
+    //noinspection GradleDependency
+    implementation("androidx.browser:browser:1.8.0")
+
+    implementation("io.github.zly2006:markdown-parser-android:0.0.1-alpha.4")
+    implementation("io.github.zly2006:markdown-renderer-android:0.0.1-alpha.4")
+
+    implementation("io.coil-kt.coil3:coil-compose:$coil")
+    implementation("io.coil-kt.coil3:coil-network-ktor3-android:$coil")
+    implementation("io.coil-kt.coil3:coil-gif:$coil")
+    implementation("io.coil-kt.coil3:coil-svg:$coil")
+
+    implementation("com.google.android.material:material:1.13.0")
+    implementation("com.materialkolor:material-kolor:4.1.1")
+
+    implementation("org.jsoup:jsoup:1.22.1")
+    implementation("androidx.legacy:legacy-support-v4:1.0.0")
+
+    // ZXing for QR code scanning
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+
+    implementation("androidx.core:core-ktx:1.17.0")
+    implementation("com.google.android.material:material:1.13.0")
+    implementation("androidx.lifecycle:lifecycle-livedata-ktx:2.10.0")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.10.0")
+    //noinspection GradleDependency
+    implementation("androidx.navigation:navigation-ui-ktx:2.9.2")
+    implementation("androidx.webkit:webkit:1.14.0")
+    implementation("androidx.activity:activity-compose:1.12.1")
+    implementation(platform("androidx.compose:compose-bom:2025.12.00"))
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-graphics")
+    implementation("androidx.compose.material:material-icons-extended")
+    //noinspection GradleDependency
+    implementation("androidx.navigation:navigation-compose:2.9.2")
+    //noinspection GradleDependency
+    implementation("androidx.compose.animation:animation:1.8.2")
+    //noinspection GradleDependency
+    implementation("androidx.compose.animation:animation-core:1.8.2")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("com.mikepenz:aboutlibraries-compose-m3:$aboutLibraries")
+    implementation("androidx.room:room-common-jvm:2.8.4")
+    implementation("androidx.room:room-runtime-android:2.8.4")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.10.0")
+    annotationProcessor("androidx.room:room-compiler:2.8.4")
+    ksp("androidx.room:room-compiler:2.8.4")
+    "fullImplementation"(project(":sentence_embeddings"))
+    debugImplementation("androidx.compose.ui:ui-tooling")
+    debugImplementation("androidx.compose.ui:ui-tooling-preview")
+    androidTestImplementation(platform("androidx.compose:compose-bom:2025.12.00"))
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
+
+    implementation("com.github.chrisbanes:PhotoView:2.0.0") {
+        exclude(group = "com.android.support")
+    }
+
+    // HanLP for Chinese NLP
+    "fullImplementation"("com.hankcs:hanlp:portable-1.8.4")
+//    implementation("com.halilibo.compose-richtext:richtext-ui-material3-android:1.0.0-alpha03")
+//    implementation("com.halilibo.compose-richtext:richtext-markdown-android:1.0.0-alpha03")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("io.ktor:ktor-client-cio:$ktor")
+    testImplementation("io.ktor:ktor-client-content-negotiation:$ktor")
+    testImplementation("io.ktor:ktor-serialization-kotlinx-json:$ktor")
+    //noinspection GradleDependency
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
+    androidTestImplementation("io.ktor:ktor-client-mock:$ktor")
+}
