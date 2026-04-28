@@ -89,22 +89,15 @@ android {
             }
         }
     }
-
-    buildTypes {
-        val gitHash = gitHash(rootProject.projectDir)
-        debug {
-            buildConfigField("String", "GIT_HASH", "\"$gitHash\"")
-        }
-        release {
-            isMinifyEnabled = true
-            isShrinkResources = true
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            buildConfigField("String", "GIT_HASH", "\"$gitHash\"")
-            if (System.getenv("signingKey") != null) {
-                signingConfig = signingConfigs["env"]
-            }
-        }
+buildTypes {
+    release {
+        // 强制使用系统默认生成的 debug 签名，不需要你自己提供文件
+        signingConfig signingConfigs.debug 
+        
+        minifyEnabled false
+        // ... 其他配置
     }
+}
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
