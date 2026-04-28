@@ -90,7 +90,7 @@ android {
         }
     }
 
-buildTypes {
+    buildTypes {
         val gitHash = gitHash(rootProject.projectDir)
         debug {
             buildConfigField("String", "GIT_HASH", "\"$gitHash\"")
